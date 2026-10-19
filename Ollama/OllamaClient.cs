@@ -12,9 +12,13 @@ using Newtonsoft.Json.Linq;
 namespace OllamaCodeCompletions
 {
     /// <summary>
-    /// Minimal client for Ollama's <c>/api/generate</c> endpoint, using its native
-    /// <c>suffix</c> parameter for fill-in-the-middle prompting. The endpoint applies
-    /// the right FIM tokens for whichever code model is configured (qwen2.5-coder,
+    /// Minimal fill-in-the-middle client for two server backends:
+    /// <list type="bullet">
+    /// <item>Ollama: <c>/api/generate</c> with its native <c>suffix</c> parameter, models via <c>/api/tags</c>.</item>
+    /// <item>llama.cpp <c>llama-server</c>: <c>/infill</c> with <c>input_prefix</c>/<c>input_suffix</c>,
+    /// models via <c>/v1/models</c>.</item>
+    /// </list>
+    /// Both apply the right FIM tokens for whichever code model is loaded (qwen2.5-coder,
     /// codellama, codegemma, deepseek-coder, …) so we don't have to hard-code them.
     /// </summary>
     internal sealed class OllamaClient
@@ -28,6 +32,7 @@ namespace OllamaCodeCompletions
 
         public sealed class CompletionRequest
         {
+            public ServerBackend Backend { get; set; }
             public string ServerUrl { get; set; }
             public string Model { get; set; }
             public string Prefix { get; set; }
@@ -48,9 +53,10 @@ namespace OllamaCodeCompletions
         {
             if (req == null) return null;
             if (string.IsNullOrWhiteSpace(req.ServerUrl)) return null;
-            if (string.IsNullOrWhiteSpace(req.Model)) return null;
+            // A single-model llama-server ignores "model"; Ollama requires it.
+            if (req.Backend == ServerBackend.Ollama && string.IsNullOrWhiteSpace(req.Model)) return null;
 
-            string url = req.ServerUrl.TrimEnd('/') + "/api/generate";
+            string url = req.ServerUrl.TrimEnd('/') + (req.Backend == ServerBackend.LlamaServer ? "/infill" : "/api/generate");
 
             // Build the stop-token array: always include the standard FIM/EOT sentinels,
             // then append any caller-supplied tokens (e.g. "\n" for single-line mode).
@@ -65,20 +71,9 @@ namespace OllamaCodeCompletions
                     stopArray.Add(token);
             }
 
-            var payload = new JObject
-            {
-                ["model"] = req.Model,
-                ["prompt"] = req.Prefix ?? string.Empty,
-                ["suffix"] = req.Suffix ?? string.Empty,
-                ["stream"] = false,
-                ["options"] = new JObject
-                {
-                    ["temperature"] = 0.2,
-                    ["top_p"] = 0.95,
-                    ["num_predict"] = req.MaxPredict,
-                    ["stop"] = stopArray
-                }
-            };
+            JObject payload = req.Backend == ServerBackend.LlamaServer
+                ? BuildInfillPayload(req, stopArray)
+                : BuildGeneratePayload(req, stopArray);
 
             // Per-request linked timeout so a hung server doesn't pin a suggestion forever.
             using (var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(Math.Max(1, req.TimeoutSeconds))))
@@ -94,7 +89,7 @@ namespace OllamaCodeCompletions
                     http.Headers.Authorization = new AuthenticationHeaderValue("Basic", b64);
                 }
 
-                Logger.Log("Http", $"POST {url} model={req.Model} predict={req.MaxPredict} timeout={req.TimeoutSeconds}s");
+                Logger.Log("Http", $"POST {url} backend={req.Backend} model={req.Model} predict={req.MaxPredict} timeout={req.TimeoutSeconds}s");
                 var sw = Stopwatch.StartNew();
                 try
                 {
@@ -107,10 +102,11 @@ namespace OllamaCodeCompletions
 
                         string body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
                         var parsed = JObject.Parse(body);
-                        string completion = (string)parsed["response"];
+                        string field = req.Backend == ServerBackend.LlamaServer ? "content" : "response";
+                        string completion = (string)parsed[field];
                         if (completion == null)
                         {
-                            Logger.Log("Http", "response field missing or non-string");
+                            Logger.Log("Http", $"{field} field missing or non-string");
                             completion = string.Empty;
                         }
                         return PostProcess(completion);
@@ -140,20 +136,57 @@ namespace OllamaCodeCompletions
             }
         }
 
+        private static JObject BuildGeneratePayload(CompletionRequest req, JArray stopArray)
+        {
+            return new JObject
+            {
+                ["model"] = req.Model,
+                ["prompt"] = req.Prefix ?? string.Empty,
+                ["suffix"] = req.Suffix ?? string.Empty,
+                ["stream"] = false,
+                ["options"] = new JObject
+                {
+                    ["temperature"] = 0.2,
+                    ["top_p"] = 0.95,
+                    ["num_predict"] = req.MaxPredict,
+                    ["stop"] = stopArray
+                }
+            };
+        }
+
+        private static JObject BuildInfillPayload(CompletionRequest req, JArray stopArray)
+        {
+            var payload = new JObject
+            {
+                ["input_prefix"] = req.Prefix ?? string.Empty,
+                ["input_suffix"] = req.Suffix ?? string.Empty,
+                ["stream"] = false,
+                ["cache_prompt"] = true,
+                ["temperature"] = 0.2,
+                ["top_p"] = 0.95,
+                ["n_predict"] = req.MaxPredict,
+                ["stop"] = stopArray
+            };
+            // A single-model llama-server ignores "model"; only router-mode servers use it.
+            if (!string.IsNullOrWhiteSpace(req.Model))
+                payload["model"] = req.Model;
+            return payload;
+        }
+
         // ---- Server discovery + diagnostics (used by the Options page UI) ----
 
         /// <summary>
         /// Returns the alphabetically-sorted list of model names available on the
-        /// configured Ollama server (GET /api/tags). Throws on any failure — the
+        /// configured server (GET /api/tags or /v1/models). Throws on any failure — the
         /// caller is expected to surface the message to the user.
         /// </summary>
         public static async Task<List<string>> ListModelsAsync(
-            string serverUrl, bool useAuth, string username, string password, CancellationToken ct)
+            ServerBackend backend, string serverUrl, bool useAuth, string username, string password, CancellationToken ct)
         {
             if (string.IsNullOrWhiteSpace(serverUrl))
                 throw new ArgumentException("Server URL is required.", nameof(serverUrl));
 
-            string url = serverUrl.TrimEnd('/') + "/api/tags";
+            string url = serverUrl.TrimEnd('/') + ModelsPath(backend);
 
             using (var http = new HttpRequestMessage(HttpMethod.Get, url))
             {
@@ -169,17 +202,9 @@ namespace OllamaCodeCompletions
                         throw new HttpRequestException($"HTTP {(int)resp.StatusCode} {resp.ReasonPhrase}");
 
                     string body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-                    var parsed = JObject.Parse(body);
-                    var models = parsed["models"] as JArray;
-                    var result = new List<string>();
-                    if (models != null)
-                    {
-                        foreach (var m in models)
-                        {
-                            string name = (string)m["name"];
-                            if (!string.IsNullOrEmpty(name)) result.Add(name);
-                        }
-                    }
+                    var result = ParseModelNames(backend, JObject.Parse(body));
+                    if (result == null)
+                        throw new HttpRequestException($"Unexpected response shape (no '{ModelsField(backend)}' field).");
                     result.Sort(StringComparer.OrdinalIgnoreCase);
                     return result;
                 }
@@ -199,18 +224,20 @@ namespace OllamaCodeCompletions
         }
 
         /// <summary>
-        /// GETs /api/tags to verify reachability + auth, then checks the configured
-        /// model is on the server. Expected failures (HTTP, JSON, auth) come back as
+        /// GETs the model list (/api/tags or /v1/models) to verify reachability + auth,
+        /// then checks the configured model is on the server. A single-model llama-server
+        /// ignores the configured model, so there a mismatch is only reported as a
+        /// failure when several models are served. Expected failures (HTTP, JSON, auth) come back as
         /// <see cref="TestConnectionResult"/> with <see cref="TestConnectionResult.Success"/>=false;
         /// truly unexpected exceptions propagate to the caller.
         /// </summary>
         public static async Task<TestConnectionResult> TestConnectionAsync(
-            string serverUrl, string model, bool useAuth, string username, string password, CancellationToken ct)
+            ServerBackend backend, string serverUrl, string model, bool useAuth, string username, string password, CancellationToken ct)
         {
             if (string.IsNullOrWhiteSpace(serverUrl))
                 return new TestConnectionResult(false, "Server URL is empty.");
 
-            string url = serverUrl.TrimEnd('/') + "/api/tags";
+            string url = serverUrl.TrimEnd('/') + ModelsPath(backend);
 
             using (var http = new HttpRequestMessage(HttpMethod.Get, url))
             {
@@ -227,20 +254,20 @@ namespace OllamaCodeCompletions
                             return new TestConnectionResult(false, $"HTTP {(int)resp.StatusCode} {resp.ReasonPhrase}");
 
                         string body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-                        var parsed = JObject.Parse(body);
-                        var models = parsed["models"] as JArray;
+                        var models = ParseModelNames(backend, JObject.Parse(body));
                         if (models == null)
-                            return new TestConnectionResult(false, "Unexpected response shape (no 'models' field).");
+                            return new TestConnectionResult(false, $"Unexpected response shape (no '{ModelsField(backend)}' field).");
 
                         if (string.IsNullOrWhiteSpace(model))
                             return new TestConnectionResult(true, $"{models.Count} model(s) available.");
 
-                        foreach (var m in models)
+                        foreach (string name in models)
                         {
-                            string name = (string)m["name"];
                             if (string.Equals(name, model, StringComparison.OrdinalIgnoreCase))
                                 return new TestConnectionResult(true, $"Model '{model}' is available.");
                         }
+                        if (backend == ServerBackend.LlamaServer && models.Count == 1)
+                            return new TestConnectionResult(true, $"Server serves '{models[0]}' (configured model is ignored).");
                         return new TestConnectionResult(false, $"Connected, but model '{model}' is not on the server.");
                     }
                 }
@@ -255,6 +282,30 @@ namespace OllamaCodeCompletions
                     return new TestConnectionResult(false, $"Bad response: {ex.Message}");
                 }
             }
+        }
+
+        private static string ModelsPath(ServerBackend backend) =>
+            backend == ServerBackend.LlamaServer ? "/v1/models" : "/api/tags";
+
+        private static string ModelsField(ServerBackend backend) =>
+            backend == ServerBackend.LlamaServer ? "data" : "models";
+
+        /// <summary>
+        /// Extracts model names from <c>models[].name</c> (Ollama) or <c>data[].id</c>
+        /// (llama-server, OpenAI-style), or null if the list field is absent.
+        /// </summary>
+        private static List<string> ParseModelNames(ServerBackend backend, JObject parsed)
+        {
+            var list = parsed[ModelsField(backend)] as JArray;
+            if (list == null) return null;
+            string nameField = backend == ServerBackend.LlamaServer ? "id" : "name";
+            var result = new List<string>();
+            foreach (var m in list)
+            {
+                string name = (string)m[nameField];
+                if (!string.IsNullOrEmpty(name)) result.Add(name);
+            }
+            return result;
         }
 
         /// <summary>Adds an <c>Authorization: Basic …</c> header when auth is enabled.</summary>

@@ -234,6 +234,7 @@ namespace OllamaCodeCompletions
             {
                 completion = await _client.GetCompletionAsync(new OllamaClient.CompletionRequest
                 {
+                    Backend = opts.Backend,
                     ServerUrl = opts.ServerUrl,
                     Model = opts.Model,
                     Prefix = prefix,
@@ -589,10 +590,10 @@ namespace OllamaCodeCompletions
 
         // ---------------------- cache helpers ----------------------
 
-        /// <summary>Clears the cache when the model has changed since the last request.</summary>
+        /// <summary>Clears the cache when the backend or model has changed since the last request.</summary>
         private void CheckModelChange(OptionsPage opts)
         {
-            string model = opts?.Model ?? string.Empty;
+            string model = opts == null ? string.Empty : $"{opts.Backend}/{opts.Model}";
             if (_lastSeenModel != null && _lastSeenModel != model)
             {
                 _cache.Clear();

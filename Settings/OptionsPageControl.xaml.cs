@@ -61,6 +61,7 @@ namespace OllamaCodeCompletions
 
             // Read live UI state directly so the user doesn't have to commit each
             // field via lost-focus before clicking the button.
+            var backend = (ServerBackend)BackendComboBox.SelectedItem;
             string serverUrl = ServerUrlTextBox.Text;
             bool useAuth = UseAuthCheckBox.IsChecked == true;
             string username = UsernameTextBox.Text;
@@ -71,7 +72,7 @@ namespace OllamaCodeCompletions
             try
             {
                 var models = await OllamaClient.ListModelsAsync(
-                    serverUrl, useAuth, username, password, CancellationToken.None);
+                    backend, serverUrl, useAuth, username, password, CancellationToken.None);
 
                 page.AvailableModels = models;
                 ModelComboBox.ItemsSource = models;
@@ -94,6 +95,7 @@ namespace OllamaCodeCompletions
         {
             if (!(DataContext is OptionsPage page)) return;
 
+            var backend = (ServerBackend)BackendComboBox.SelectedItem;
             string serverUrl = ServerUrlTextBox.Text;
             string model = ModelComboBox.Text;
             bool useAuth = UseAuthCheckBox.IsChecked == true;
@@ -106,7 +108,7 @@ namespace OllamaCodeCompletions
             try
             {
                 var result = await OllamaClient.TestConnectionAsync(
-                    serverUrl, model, useAuth, username, password, CancellationToken.None);
+                    backend, serverUrl, model, useAuth, username, password, CancellationToken.None);
                 sw.Stop();
 
                 StatusText.Text = result.Success
