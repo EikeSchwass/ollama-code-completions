@@ -70,6 +70,7 @@
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="120"/>
@@ -88,6 +89,10 @@
                     <Label Grid.Row="2" Grid.Column="0" Content="Password:" VerticalAlignment="Center"/>
                     <PasswordBox x:Name="PasswordBox" Grid.Row="2" Grid.Column="1" Margin="0,4"
                                  IsEnabled="{Binding ElementName=UseAuthCheckBox, Path=IsChecked}"/>
+
+                    <Label Grid.Row="3" Grid.Column="0" Content="API key:" VerticalAlignment="Center"/>
+                    <PasswordBox x:Name="ApiKeyBox" Grid.Row="3" Grid.Column="1" Margin="0,4"
+                                 ToolTip="Bearer token for llama-server --api-key. Ignored by Ollama and when HTTP Basic auth is enabled."/>
                 </Grid>
             </GroupBox>
 

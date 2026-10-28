@@ -49,7 +49,6 @@ namespace OllamaCodeCompletions
         }
 
         private readonly IWpfTextView _view;
-        private readonly OllamaClient _client = new OllamaClient();
         private readonly CompletionCache _cache = new CompletionCache();
 
         private CancellationTokenSource _cts;
@@ -219,12 +218,16 @@ namespace OllamaCodeCompletions
             }
             Logger.Log("Cache", "MISS");
 
-            string username = null, password = null;
+            string username = null, password = null, apiKey = null;
             if (opts.UseAuthentication)
             {
                 var creds = CredentialStorage.Read();
                 username = creds.Username;
                 password = creds.Password;
+            }
+            else if (opts.Backend == ServerBackend.LlamaServer)
+            {
+                apiKey = CredentialStorage.GetApiKey();
             }
 
             await StatusBar.SetAsync("Ollama Code Completions: thinking…").ConfigureAwait(false);
@@ -232,9 +235,9 @@ namespace OllamaCodeCompletions
             string completion;
             try
             {
-                completion = await _client.GetCompletionAsync(new OllamaClient.CompletionRequest
+                // Clients are stateless (they share one static HttpClient), so one per request is cheap.
+                completion = await CompletionClient.Create(opts.Backend).GetCompletionAsync(new CompletionClient.CompletionRequest
                 {
-                    Backend = opts.Backend,
                     ServerUrl = opts.ServerUrl,
                     Model = opts.Model,
                     Prefix = prefix,
@@ -244,6 +247,7 @@ namespace OllamaCodeCompletions
                     UseAuth = opts.UseAuthentication,
                     Username = username,
                     Password = password,
+                    ApiKey = apiKey,
                     StopTokens = stopTokens,
                 }, ct).ConfigureAwait(false);
             }

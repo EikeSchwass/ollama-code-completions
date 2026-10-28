@@ -84,6 +84,21 @@ namespace OllamaCodeCompletions
             }
         }
 
+        [Category(CategoryAuthentication)]
+        [DisplayName("API key")]
+        [Description("Bearer token for llama-server --api-key. Ignored by Ollama and when HTTP Basic auth is enabled. Stored securely in the Windows Credential Manager (target: OllamaCopilot:ApiKey).")]
+        [PasswordPropertyText(true)]
+        public string ApiKey
+        {
+            // Same sentinel scheme as Password: the real key never leaves the credential store.
+            get => string.IsNullOrEmpty(CredentialStorage.GetApiKey()) ? string.Empty : PasswordSentinel;
+            set
+            {
+                if (value == PasswordSentinel) return;       // unchanged in the dialog
+                CredentialStorage.SaveApiKey(value ?? string.Empty);
+            }
+        }
+
         // --- Behavior ---
 
         [Category(CategoryBehavior)]
